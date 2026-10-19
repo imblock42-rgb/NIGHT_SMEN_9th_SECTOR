@@ -1,0 +1,2194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Ночная смена: Сектор-9</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;
+    font-family:'Courier New',Consolas,monospace;-webkit-user-select:none;user-select:none;touch-action:none;}
+  #c{position:absolute;display:block;background:#05070a;image-rendering:auto;
+    box-shadow:0 0 90px rgba(0,150,255,.10);cursor:crosshair;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   КОНСТАНТЫ И УТИЛИТЫ
+   ============================================================ */
+const VW = 1280, VH = 720;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha:false });
+canvas.width = VW; canvas.height = VH;
+
+const bgCanvas = document.createElement('canvas');
+bgCanvas.width = VW; bgCanvas.height = VH;
+const bgCtx = bgCanvas.getContext('2d');
+
+const clamp = (v,a,b)=> v<a?a:(v>b?b:v);
+const lerp  = (a,b,t)=> a+(b-a)*t;
+const rnd   = (a,b)=> a+Math.random()*(b-a);
+const rndi  = (a,b)=> Math.floor(a+Math.random()*(b-a+1));
+const TAU = Math.PI*2;
+function dist2(x1,y1,x2,y2){ const dx=x2-x1, dy=y2-y1; return dx*dx+dy*dy; }
+function dist(x1,y1,x2,y2){ return Math.sqrt(dist2(x1,y1,x2,y2)); }
+
+function rr(c,x,y,w,h,r){
+  r = Math.min(r, w*0.5, h*0.5);
+  c.beginPath();
+  c.moveTo(x+r,y);
+  c.arcTo(x+w,y,x+w,y+h,r);
+  c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r);
+  c.arcTo(x,y,x+w,y,r);
+  c.closePath();
+}
+function txt(s,x,y,size,color,align,weight){
+  ctx.font = (weight||'')+' '+size+'px "Courier New",Consolas,monospace';
+  ctx.fillStyle = color;
+  ctx.textAlign = align||'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s,x,y);
+}
+function inRect(mx,my,x,y,w,h){ return mx>=x && mx<=x+w && my>=y && my<=y+h; }
+
+/* ============================================================
+   ХРАНИЛИЩЕ
+   ============================================================ */
+const Store = {
+  get(k,d){ try{ const v = localStorage.getItem('ns9_'+k); return v===null?d:JSON.parse(v); }catch(e){ return d; } },
+  set(k,v){ try{ localStorage.setItem('ns9_'+k, JSON.stringify(v)); }catch(e){} }
+};
+
+const settings = {
+  volume:  Store.get('vol', 0.6),
+  crt:     Store.get('crt', true),
+  quality: Store.get('quality', 1)
+};
+
+/* ============================================================
+   АУДИО — ЧИСТЫЙ WEB AUDIO API
+   ============================================================ */
+const Snd = (function(){
+  let ac=null, master=null, noiseBuf=null;
+  let humOsc=null, humGain=null, humOn=false;
+  let sirenOsc=null, sirenLfo=null, sirenGain=null, sirenOn=false;
+  let vol = settings.volume;
+
+  function init(){
+    if(ac){ if(ac.state==='suspended'){ try{ac.resume();}catch(e){} } return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    try{
+      ac = new AC();
+      master = ac.createGain();
+      master.gain.value = vol*0.55;
+      master.connect(ac.destination);
+      const len = Math.floor(ac.sampleRate*1.5);
+      noiseBuf = ac.createBuffer(1, len, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    }catch(e){ ac=null; }
+  }
+  function setVol(v){ vol=v; if(master) master.gain.value = v*0.55; }
+
+  function blip(f1,f2,dur,type,g){
+    if(!ac) return;
+    const t = ac.currentTime;
+    const o = ac.createOscillator(), gn = ac.createGain();
+    o.type = type||'square';
+    o.frequency.setValueAtTime(Math.max(20,f1), t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20,f2), t+dur);
+    gn.gain.setValueAtTime(0.0001, t);
+    gn.gain.linearRampToValueAtTime(g, t+0.008);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(gn); gn.connect(master);
+    o.start(t); o.stop(t+dur+0.03);
+  }
+  function noiseBurst(dur,g,freq,q){
+    if(!ac||!noiseBuf) return;
+    const t = ac.currentTime;
+    const s = ac.createBufferSource(); s.buffer = noiseBuf;
+    s.playbackRate.value = 1;
+    const f = ac.createBiquadFilter(); f.type='bandpass';
+    f.frequency.value = freq||800; f.Q.value = q||1;
+    const gn = ac.createGain();
+    gn.gain.setValueAtTime(g, t);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    s.connect(f); f.connect(gn); gn.connect(master);
+    s.start(t); s.stop(t+dur+0.02);
+  }
+
+  function shoot(){ blip(900,220,0.09,'square',0.13); noiseBurst(0.06,0.06,2400,2); }
+  function turret(){ blip(1400,500,0.05,'square',0.045); }
+  function hit(){ noiseBurst(0.07,0.10,700,2); }
+  function kill(){ blip(320,70,0.22,'sawtooth',0.10); noiseBurst(0.16,0.09,420,1); }
+  function buy(){ blip(620,1240,0.13,'sine',0.14); }
+  function err(){ blip(190,130,0.16,'square',0.11); }
+  function click(){ blip(760,760,0.04,'square',0.06); }
+  function gateBreak(){ blip(210,45,0.55,'sawtooth',0.18); noiseBurst(0.5,0.22,320,0.8); }
+  function coreHit(){ blip(140,60,0.3,'sawtooth',0.16); noiseBurst(0.25,0.14,260,0.9); }
+  function heartbeat(){ blip(62,40,0.16,'sine',0.30); setTimeout(()=>{ blip(56,36,0.18,'sine',0.22); }, 150); }
+  function alarmBeep(){ blip(880,880,0.10,'square',0.07); }
+
+  function startHum(){
+    if(!ac||humOn) return;
+    humOsc = ac.createOscillator(); humOsc.type='sawtooth'; humOsc.frequency.value=47;
+    const f = ac.createBiquadFilter(); f.type='lowpass'; f.frequency.value=150;
+    humGain = ac.createGain(); humGain.gain.value=0.0001;
+    humOsc.connect(f); f.connect(humGain); humGain.connect(master);
+    humOsc.start();
+    humGain.gain.linearRampToValueAtTime(0.055, ac.currentTime+1.2);
+    humOn = true;
+  }
+  function stopHum(){
+    if(!humOsc) return;
+    try{ humOsc.stop(ac.currentTime+0.2); }catch(e){}
+    humOsc=null; humOn=false;
+  }
+  function startSiren(){
+    if(!ac||sirenOn) return;
+    sirenOsc = ac.createOscillator(); sirenOsc.type='sawtooth'; sirenOsc.frequency.value=540;
+    sirenLfo = ac.createOscillator(); sirenLfo.type='sine'; sirenLfo.frequency.value=0.8;
+    const lg = ac.createGain(); lg.gain.value=170;
+    sirenLfo.connect(lg); lg.connect(sirenOsc.frequency);
+    sirenGain = ac.createGain(); sirenGain.gain.value=0.0001;
+    sirenOsc.connect(sirenGain); sirenGain.connect(master);
+    sirenOsc.start(); sirenLfo.start();
+    sirenGain.gain.linearRampToValueAtTime(0.045, ac.currentTime+0.6);
+    sirenOn = true;
+  }
+  function stopSiren(){
+    if(!sirenOsc) return;
+    try{ sirenOsc.stop(ac.currentTime+0.3); sirenLfo.stop(ac.currentTime+0.3); }catch(e){}
+    sirenOsc=null; sirenLfo=null; sirenOn=false;
+  }
+  function silenceAll(){ stopHum(); stopSiren(); }
+
+  return { init, setVol, shoot, turret, hit, kill, buy, err, click,
+           gateBreak, coreHit, heartbeat, alarmBeep,
+           startHum, stopHum, startSiren, stopSiren, silenceAll };
+})();
+
+/* ============================================================
+   ГЕОМЕТРИЯ КОМПЛЕКСА
+   ============================================================ */
+const ROOMS = {
+  gateA: { x:570,  y:92,  w:140, h:80,  name:'ШЛЮЗ А',    type:'gate' },
+  gateB: { x:38,   y:300, w:120, h:120, name:'ШЛЮЗ Б',    type:'gate' },
+  gateC: { x:1122, y:300, w:120, h:120, name:'ШЛЮЗ В',    type:'gate' },
+  vent:  { x:570,  y:552, w:140, h:90,  name:'ВЕНТШАХТА', type:'vent' },
+  core:  { x:540,  y:282, w:200, h:150, name:'ТЕРМИНАЛ',  type:'core' },
+  gen:   { x:228,  y:498, w:172, h:132, name:'ГЕНЕРАТОР', type:'gen' },
+  oxy:   { x:880,  y:498, w:172, h:132, name:'КИСЛОРОД',  type:'oxy' },
+  arm:   { x:228,  y:108, w:172, h:132, name:'АРСЕНАЛ',   type:'arm' }
+};
+const CORE = { x:640, y:357 };
+
+const GATE_DATA = {
+  gateA: { spawn:{x:640,y:44},  breach:{x:640,y:178},  cx:640,  cy:132, label:'А' },
+  gateB: { spawn:{x:6,y:360},   breach:{x:164,y:360},  cx:98,   cy:360, label:'Б' },
+  gateC: { spawn:{x:1274,y:360},breach:{x:1116,y:360}, cx:1182, cy:360, label:'В' },
+  vent:  { spawn:{x:640,y:704}, breach:{x:640,y:546},  cx:640,  cy:597, label:'V' }
+};
+const GATE_IDS = ['gateA','gateB','gateC','vent'];
+
+const TURRET_SLOTS = {
+  gateA: { x:684, y:130 }, gateB: { x:92, y:334 },
+  gateC: { x:1188, y:334 }, vent: { x:684, y:602 }
+};
+
+const SECTORS = [
+  { id:'core',  name:'ЦЕНТРАЛЬНЫЙ ТЕРМИНАЛ', rooms:['core'] },
+  { id:'gen',   name:'ГЕНЕРАТОРНЫЙ ОТСЕК',   rooms:['gen'] },
+  { id:'oxy',   name:'КИСЛОРОДНЫЙ УЗЕЛ',     rooms:['oxy'] },
+  { id:'arm',   name:'АРСЕНАЛ И МАГАЗИН',    rooms:['arm'] },
+  { id:'gates', name:'ЗАЩИТНЫЕ ШЛЮЗЫ А/Б/В', rooms:['gateA','gateB','gateC'] },
+  { id:'vent',  name:'ВЕНТИЛЯЦИОННАЯ ШАХТА', rooms:['vent'] }
+];
+
+/* ============================================================
+   БАЗА ДАННЫХ ОРУЖИЯ / ВРАГОВ
+   ============================================================ */
+const WEAPONS = [
+  { id:'taser',   name:'ШОКЕР',            dmg:11, cd:0.28, cost:1.0,  color:'#5ad1ff', price:0   },
+  { id:'shotgun', name:'ДРОБОВИК',         dmg:34, cd:0.82, cost:3.5,  color:'#ffb45a', price:230 },
+  { id:'emp',     name:'ИМП-ИЗЛУЧАТЕЛЬ',   dmg:52, cd:1.10, cost:7.0,  color:'#a97bff', price:480 },
+  { id:'plasma',  name:'ПЛАЗМЕННЫЙ РЕЗАК', dmg:92, cd:1.55, cost:12.0, color:'#ff5a7a', price:840 }
+];
+
+const ENEMY_DEFS = {
+  parasite: { name:'МУТАНТ-ПАРАЗИТ', hp:34,  speed:80, dmg:7,  atk:0.75, size:8,  color:'#6fe36b', reward:11 },
+  drone:    { name:'ДРОН-ВЗЛОМЩИК',  hp:92,  speed:42, dmg:13, atk:1.10, size:13, color:'#e0a45c', reward:21 },
+  stealth:  { name:'СТЕЛС-ОСОБЬ',    hp:54,  speed:66, dmg:10, atk:0.90, size:10, color:'#b06bff', reward:28 },
+  brute:    { name:'БИО-ТАНК',       hp:185, speed:30, dmg:23, atk:1.50, size:17, color:'#e35c5c', reward:48 }
+};
+
+/* ============================================================
+   ПУЛЫ ОБЪЕКТОВ
+   ============================================================ */
+function makeEnemyObj(){
+  return { active:false, type:'', x:0, y:0, hp:0, maxHp:0, speed:0, dmg:0,
+           atk:1, atkCd:0, size:8, color:'#fff', reward:0, gateId:'',
+           inside:false, angle:0, anim:0, flash:0, slow:0,
+           cloaked:false, cloakT:0, spawnT:0 };
+}
+const enemyPool = [];
+for(let i=0;i<220;i++) enemyPool.push(makeEnemyObj());
+
+function makeParticle(){
+  return { active:false, x:0, y:0, vx:0, vy:0, life:0, maxLife:1, size:2, color:'#fff', drag:0.94 };
+}
+const particlePool = [];
+for(let i=0;i<700;i++) particlePool.push(makeParticle());
+
+function makeBeam(){
+  return { active:false, x1:0, y1:0, x2:0, y2:0, life:0, maxLife:0.14, color:'#fff', width:2 };
+}
+const beamPool = [];
+for(let i=0;i<64;i++) beamPool.push(makeBeam());
+
+function spawnParticle(x,y,vx,vy,life,size,color){
+  for(let i=0;i<particlePool.length;i++){
+    const p = particlePool[i];
+    if(!p.active){
+      p.active=true; p.x=x; p.y=y; p.vx=vx; p.vy=vy;
+      p.life=life; p.maxLife=life; p.size=size; p.color=color; p.drag=0.94;
+      return;
+    }
+  }
+}
+function burst(x,y,n,color,power,size){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*TAU;
+    const s = rnd(power*0.25, power);
+    spawnParticle(x,y,Math.cos(a)*s,Math.sin(a)*s,rnd(0.25,0.75),rnd(size*0.5,size),color);
+  }
+}
+function spawnBeam(x1,y1,x2,y2,color,width,life){
+  for(let i=0;i<beamPool.length;i++){
+    const b = beamPool[i];
+    if(!b.active){
+      b.active=true; b.x1=x1; b.y1=y1; b.x2=x2; b.y2=y2;
+      b.color=color; b.width=width||2; b.life=life||0.14; b.maxLife=b.life;
+      return;
+    }
+  }
+}
+
+/* ============================================================
+   ФОНОВЫЙ СЛОЙ (ПРЕДРЕНДЕР)
+   ============================================================ */
+function buildBackground(){
+  const c = bgCtx;
+  c.fillStyle = '#05070a';
+  c.fillRect(0,0,VW,VH);
+
+  c.strokeStyle = 'rgba(30,64,88,0.16)';
+  c.lineWidth = 1;
+  c.beginPath();
+  for(let x=0;x<=VW;x+=40){ c.moveTo(x+0.5,0); c.lineTo(x+0.5,VH); }
+  for(let y=0;y<=VH;y+=40){ c.moveTo(0,y+0.5); c.lineTo(VW,y+0.5); }
+  c.stroke();
+
+  // коридоры
+  const ids = ['gateA','gateB','gateC','vent','gen','oxy','arm'];
+  c.lineCap = 'round';
+  for(const id of ids){
+    const r = ROOMS[id];
+    const cx = r.x + r.w/2, cy = r.y + r.h/2;
+    c.strokeStyle = '#0b1119';
+    c.lineWidth = 52;
+    c.beginPath(); c.moveTo(cx,cy); c.lineTo(CORE.x,CORE.y); c.stroke();
+  }
+  for(const id of ids){
+    const r = ROOMS[id];
+    const cx = r.x + r.w/2, cy = r.y + r.h/2;
+    c.strokeStyle = 'rgba(60,130,170,0.22)';
+    c.lineWidth = 2;
+    c.setLineDash([10,12]);
+    c.beginPath(); c.moveTo(cx,cy); c.lineTo(CORE.x,CORE.y); c.stroke();
+    c.setLineDash([]);
+  }
+
+  // комнаты
+  for(const id in ROOMS){
+    const r = ROOMS[id];
+    c.fillStyle = '#0c121b';
+    rr(c, r.x, r.y, r.w, r.h, 8); c.fill();
+    c.strokeStyle = 'rgba(44,74,100,0.85)';
+    c.lineWidth = 2;
+    rr(c, r.x, r.y, r.w, r.h, 8); c.stroke();
+
+    // угловые засечки
+    c.strokeStyle = 'rgba(80,170,220,0.5)';
+    c.lineWidth = 2;
+    const t = 14;
+    c.beginPath();
+    c.moveTo(r.x+4, r.y+4+t); c.lineTo(r.x+4, r.y+4); c.lineTo(r.x+4+t, r.y+4);
+    c.moveTo(r.x+r.w-4-t, r.y+4); c.lineTo(r.x+r.w-4, r.y+4); c.lineTo(r.x+r.w-4, r.y+4+t);
+    c.moveTo(r.x+4, r.y+r.h-4-t); c.lineTo(r.x+4, r.y+r.h-4); c.lineTo(r.x+4+t, r.y+r.h-4);
+    c.moveTo(r.x+r.w-4-t, r.y+r.h-4); c.lineTo(r.x+r.w-4, r.y+r.h-4); c.lineTo(r.x+r.w-4, r.y+r.h-4-t);
+    c.stroke();
+
+    // внутренняя сетка
+    c.strokeStyle = 'rgba(40,80,110,0.30)';
+    c.lineWidth = 1;
+    c.beginPath();
+    for(let gx=r.x+20; gx<r.x+r.w-6; gx+=20){ c.moveTo(gx+0.5, r.y+6); c.lineTo(gx+0.5, r.y+r.h-6); }
+    for(let gy=r.y+20; gy<r.y+r.h-6; gy+=20){ c.moveTo(r.x+6, gy+0.5); c.lineTo(r.x+r.w-6, gy+0.5); }
+    c.stroke();
+
+    c.font = 'bold 11px "Courier New",monospace';
+    c.fillStyle = 'rgba(110,180,220,0.75)';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(r.name, r.x+r.w/2, r.y+14);
+  }
+}
+
+/* ============================================================
+   ЭФФЕКТЫ CRT
+   ============================================================ */
+const scanCanvas = document.createElement('canvas');
+scanCanvas.width = 1; scanCanvas.height = 4;
+(function(){
+  const s = scanCanvas.getContext('2d');
+  s.fillStyle = 'rgba(0,0,0,0.42)';
+  s.fillRect(0,0,1,2);
+})();
+const scanPattern = ctx.createPattern(scanCanvas,'repeat');
+
+const noiseCanvas = document.createElement('canvas');
+noiseCanvas.width = 200; noiseCanvas.height = 120;
+const nctx = noiseCanvas.getContext('2d');
+const noiseImg = nctx.createImageData(200,120);
+function updateNoise(){
+  const d = noiseImg.data;
+  for(let i=0;i<d.length;i+=4){
+    const v = (Math.random()*255)|0;
+    d[i]=v; d[i+1]=v; d[i+2]=v; d[i+3]=30;
+  }
+  nctx.putImageData(noiseImg,0,0);
+}
+
+const lightCanvas = document.createElement('canvas');
+lightCanvas.width = lightCanvas.height = 256;
+(function(){
+  const l = lightCanvas.getContext('2d');
+  const g = l.createRadialGradient(128,128,0,128,128,128);
+  g.addColorStop(0,'rgba(130,205,255,0.55)');
+  g.addColorStop(0.35,'rgba(60,130,200,0.20)');
+  g.addColorStop(1,'rgba(0,0,0,0)');
+  l.fillStyle = g; l.fillRect(0,0,256,256);
+})();
+
+function drawCRTOverlay(alpha){
+  ctx.save();
+  ctx.fillStyle = scanPattern;
+  ctx.fillRect(0,0,VW,VH);
+  ctx.globalAlpha = 1;
+  const img = noiseCanvas;
+  ctx.imageSmoothingEnabled = false;
+  ctx.globalAlpha = alpha===undefined?0.35:alpha;
+  ctx.drawImage(img,0,0,VW,VH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.restore();
+}
+
+/* ============================================================
+   СОСТОЯНИЕ
+   ============================================================ */
+let screen = 'menu';
+let game = null;
+let T = 0;
+let menuT = 0;
+let modeChoice = 'survival';
+let noiseTick = 0;
+let zones = [];
+const mouse = { x:-999, y:-999 };
+
+function addZone(x,y,w,h,fn){ zones.push({x,y,w,h,fn}); }
+function hitTest(mx,my){
+  for(let i=zones.length-1;i>=0;i--){
+    const z = zones[i];
+    if(mx>=z.x && mx<=z.x+z.w && my>=z.y && my<=z.y+z.h) return z;
+  }
+  return null;
+}
+
+const bestRecord = () => Store.get('best', 0);
+
+/* ============================================================
+   СОЗДАНИЕ ИГРЫ
+   ============================================================ */
+function newGame(mode){
+  return {
+    mode: mode,
+    time: 0,
+    clock: '22:00',
+    progress: 0,
+    danger: 1,
+    energy: 100,
+    energyMax: 100,
+    oxygen: 100,
+    credits: 140,
+    coreHP: 100,
+    gates: {
+      gateA: { hp:100, max:100, broken:false },
+      gateB: { hp:100, max:100, broken:false },
+      gateC: { hp:100, max:100, broken:false },
+      vent:  { hp:100, max:100, broken:false }
+    },
+    turrets: [],
+    lasers: [],
+    blocker: false,
+    weapon: 0,
+    unlocked: [true,false,false,false],
+    fireCd: 0,
+    spawnTimer: 2.4,
+    rebootCd: 0,
+    repairCd: 0,
+    oxygenCd: 0,
+    upgrades: { gen:0, autoRepair:0, scanner:0 },
+    stats: { kills:0, energySpent:0, spent:0, upgradesBought:0, repairs:0, damageTaken:0 },
+    shake: 0,
+    sector: 0,
+    heartbeatT: 0,
+    alarmT: 0,
+    over: false,
+    flashRed: 0
+  };
+}
+
+/* ============================================================
+   МЕТОДЫ ИГРЫ
+   ============================================================ */
+function startGame(mode){
+  game = newGame(mode);
+  screen = 'game';
+  Snd.init();
+  Snd.startHum();
+  if(mode==='hardcore') Snd.startSiren();
+}
+function stopAllAudio(){ Snd.silenceAll(); }
+
+function finishGame(win){
+  if(!game || game.over) return;
+  game.over = true;
+  game.victory = win;
+  stopAllAudio();
+  if(game.mode==='endless'){
+    const b = bestRecord();
+    if(game.time > b) Store.set('best', game.time);
+  }
+  screen = win ? 'victory' : 'over';
+}
+
+function pickEnemyType(prog){
+  const r = Math.random();
+  if(prog < 0.18) return r<0.88 ? 'parasite':'drone';
+  if(prog < 0.42) return r<0.60 ? 'parasite' : (r<0.86 ? 'drone':'stealth');
+  if(prog < 0.68) return r<0.40 ? 'parasite' : (r<0.70 ? 'drone' : (r<0.90 ? 'stealth':'brute'));
+  return r<0.24 ? 'parasite' : (r<0.54 ? 'drone' : (r<0.80 ? 'stealth':'brute'));
+}
+
+function spawnEnemy(){
+  const G = game;
+  let e = null;
+  for(let i=0;i<enemyPool.length;i++){ if(!enemyPool[i].active){ e = enemyPool[i]; break; } }
+  if(!e) return;
+
+  const type = pickEnemyType(G.progress);
+  const def = ENEMY_DEFS[type];
+  const gateId = GATE_IDS[rndi(0,3)];
+  const gd = GATE_DATA[gateId];
+
+  let hpMul = 1 + G.progress*0.85;
+  let spMul = 1;
+  if(G.mode==='hardcore'){ hpMul *= 1.25; spMul = 1.28; }
+
+  e.active = true;
+  e.type = type;
+  e.x = gd.spawn.x + rnd(-8,8);
+  e.y = gd.spawn.y + rnd(-8,8);
+  e.hp = def.hp * hpMul;
+  e.maxHp = e.hp;
+  e.speed = def.speed * spMul * rnd(0.9,1.12);
+  e.dmg = def.dmg;
+  e.atk = def.atk;
+  e.atkCd = rnd(0,0.4);
+  e.size = def.size;
+  e.color = def.color;
+  e.reward = def.reward;
+  e.gateId = gateId;
+  e.inside = false;
+  e.angle = 0;
+  e.anim = Math.random()*TAU;
+  e.flash = 0;
+  e.slow = 0;
+  e.spawnT = 0.25;
+  e.cloaked = false;
+  e.cloakT = type==='stealth' ? rnd(1.0,2.0) : 0;
+}
+
+function damageEnemy(e, dmg, splashColor){
+  if(!e.active) return;
+  e.hp -= dmg;
+  e.flash = 0.12;
+  burst(e.x, e.y, 3, splashColor||e.color, 90, 2.2);
+  if(e.hp <= 0){
+    killEnemy(e);
+  } else {
+    Snd.hit();
+  }
+}
+
+function killEnemy(e){
+  const G = game;
+  e.active = false;
+  G.credits += e.reward;
+  G.stats.kills++;
+  burst(e.x, e.y, 16, e.color, 190, 3.2);
+  burst(e.x, e.y, 6, '#ffffff', 130, 2);
+  Snd.kill();
+}
+
+function fireAt(tx,ty){
+  const G = game;
+  if(!G || G.over) return;
+  if(G.fireCd > 0) return;
+  const w = WEAPONS[G.weapon];
+  if(G.energy < w.cost){ Snd.err(); return; }
+
+  G.energy -= w.cost;
+  G.stats.energySpent += w.cost;
+  G.fireCd = w.cd;
+
+  spawnBeam(CORE.x, CORE.y, tx, ty, w.color, w.id==='plasma'?4:2, 0.13);
+  burst(tx, ty, 5, w.color, 120, 2.4);
+  Snd.shoot();
+
+  // поиск цели
+  let best = null, bestD = 26*26;
+  for(let i=0;i<enemyPool.length;i++){
+    const e = enemyPool[i];
+    if(!e.active || e.cloaked) continue;
+    const d = dist2(e.x,e.y,tx,ty);
+    if(d < bestD){ bestD = d; best = e; }
+  }
+  if(best){
+    damageEnemy(best, w.dmg, w.color);
+    if(w.id==='plasma'){
+      for(let i=0;i<enemyPool.length;i++){
+        const e = enemyPool[i];
+        if(!e.active || e===best) continue;
+        if(dist2(e.x,e.y,best.x,best.y) < 55*55) damageEnemy(e, w.dmg*0.45, w.color);
+      }
+      burst(best.x,best.y,14,w.color,210,3);
+    }
+    if(w.id==='emp'){
+      best.slow = Math.max(best.slow, 1.6);
+    }
+  }
+}
+
+function repairGates(){
+  const G = game;
+  if(!G || G.over) return;
+  if(G.repairCd > 0) { Snd.err(); return; }
+  if(G.energy < 30){ Snd.err(); return; }
+  G.energy -= 30;
+  G.stats.energySpent += 30;
+  G.stats.repairs++;
+  G.repairCd = 1.0;
+  for(const id of GATE_IDS){
+    const g = G.gates[id];
+    if(g.hp > 0) g.hp = clamp(g.hp + 26, 0, g.max);
+  }
+  Snd.buy();
+  for(const id of GATE_IDS){
+    const gd = GATE_DATA[id];
+    burst(gd.cx, gd.cy, 8, '#4affd0', 90, 2.5);
+  }
+}
+
+function boostOxygen(){
+  const G = game;
+  if(!G || G.over) return;
+  if(G.oxygenCd > 0){ Snd.err(); return; }
+  if(G.energy < 16){ Snd.err(); return; }
+  G.energy -= 16;
+  G.stats.energySpent += 16;
+  G.oxygen = clamp(G.oxygen + 22, 0, 100);
+  G.oxygenCd = 1.2;
+  const r = ROOMS.oxy;
+  burst(r.x+r.w/2, r.y+r.h/2, 14, '#4affd0', 120, 3);
+  Snd.buy();
+}
+
+function rebootEnergy(){
+  const G = game;
+  if(!G || G.over) return;
+  if(G.rebootCd > 0){ Snd.err(); return; }
+  G.energy = clamp(G.energy + 34, 0, G.energyMax);
+  G.oxygen = clamp(G.oxygen - 6, 0, 100);
+  G.rebootCd = 18;
+  const r = ROOMS.gen;
+  burst(r.x+r.w/2, r.y+r.h/2, 22, '#ffcf4a', 170, 3.2);
+  Snd.buy();
+}
+
+function cycleWeapon(dir){
+  const G = game;
+  if(!G) return;
+  let idx = G.weapon;
+  for(let i=0;i<4;i++){
+    idx = (idx + dir + 4) % 4;
+    if(G.unlocked[idx]){ G.weapon = idx; Snd.click(); return; }
+  }
+}
+
+/* ============================================================
+   МАГАЗИН
+   ============================================================ */
+function buyTurret(gateId){
+  const G = game;
+  if(G.turrets.some(t=>t.gateId===gateId)) return false;
+  const cost = 175;
+  if(G.credits < cost){ Snd.err(); return false; }
+  G.credits -= cost; G.stats.spent += cost;
+  const s = TURRET_SLOTS[gateId];
+  G.turrets.push({ gateId, x:s.x, y:s.y, cd:0, angle:0 });
+  Snd.buy();
+  return true;
+}
+function buyLaser(gateId){
+  const G = game;
+  const lv = G.lasers.filter(l=>l.gateId===gateId).length;
+  if(lv >= 3) return false;
+  const cost = 115 + lv*45;
+  if(G.credits < cost){ Snd.err(); return false; }
+  G.credits -= cost; G.stats.spent += cost;
+  G.lasers.push({ gateId, cd:0 });
+  Snd.buy();
+  return true;
+}
+function buyBlocker(){
+  const G = game;
+  if(G.blocker) return false;
+  const cost = 160;
+  if(G.credits < cost){ Snd.err(); return false; }
+  G.credits -= cost; G.stats.spent += cost;
+  G.blocker = true;
+  Snd.buy();
+  return true;
+}
+function buyWeapon(i){
+  const G = game;
+  if(G.unlocked[i]) return false;
+  const cost = WEAPONS[i].price;
+  if(G.credits < cost){ Snd.err(); return false; }
+  G.credits -= cost; G.stats.spent += cost;
+  G.unlocked[i] = true;
+  G.weapon = i;
+  Snd.buy();
+  return true;
+}
+function buyUpgrade(key){
+  const G = game;
+  if(key==='gen'){
+    if(G.upgrades.gen >= 3) return false;
+    const cost = [230, 400, 640][G.upgrades.gen];
+    if(G.credits < cost){ Snd.err(); return false; }
+    G.credits -= cost; G.stats.spent += cost;
+    G.upgrades.gen++;
+    G.stats.upgradesBought++;
+    Snd.buy(); return true;
+  }
+  if(key==='autoRepair'){
+    if(G.upgrades.autoRepair > 0) return false;
+    const cost = 350;
+    if(G.credits < cost){ Snd.err(); return false; }
+    G.credits -= cost; G.stats.spent += cost;
+    G.upgrades.autoRepair = 1;
+    G.stats.upgradesBought++;
+    Snd.buy(); return true;
+  }
+  if(key==='scanner'){
+    if(G.upgrades.scanner > 0) return false;
+    const cost = 190;
+    if(G.credits < cost){ Snd.err(); return false; }
+    G.credits -= cost; G.stats.spent += cost;
+    G.upgrades.scanner = 1;
+    G.stats.upgradesBought++;
+    Snd.buy(); return true;
+  }
+  return false;
+}
+
+function getShopItems(){
+  const G = game;
+  const items = [];
+
+  for(const gid of GATE_IDS){
+    const owned = G.turrets.some(t=>t.gateId===gid);
+    items.push({
+      name:'ТУРЕЛЬ «СТРАЖ»', sub:ROOMS[gid].name,
+      price:175, owned, cat:'ТУРЕЛИ',
+      buy:()=>buyTurret(gid)
+    });
+  }
+  for(const gid of ['gateA','gateB','gateC']){
+    const lv = G.lasers.filter(l=>l.gateId===gid).length;
+    items.push({
+      name:'ЛАЗЕРНАЯ РАСТЯЖКА', sub:ROOMS[gid].name+' ['+lv+'/3]',
+      price:115+lv*45, owned:lv>=3, cat:'ЛОВУШКИ',
+      buy:()=>buyLaser(gid)
+    });
+  }
+  items.push({
+    name:'ЭЛЕКТРОБЛОКИРАТОР', sub:'Замедляет врагов у шлюзов',
+    price:160, owned:G.blocker, cat:'ЛОВУШКИ',
+    buy:()=>buyBlocker()
+  });
+  for(let i=1;i<WEAPONS.length;i++){
+    items.push({
+      name:WEAPONS[i].name, sub:'Урон '+WEAPONS[i].dmg+' / заряд '+WEAPONS[i].cost,
+      price:WEAPONS[i].price, owned:G.unlocked[i], cat:'ОРУЖИЕ',
+      buy:()=>buyWeapon(i)
+    });
+  }
+  items.push({
+    name:'МОЩНОСТЬ ГЕНЕРАТОРА', sub:'Уровень '+G.upgrades.gen+'/3  (+1.6 эн/с)',
+    price:[230,400,640][G.upgrades.gen]||0, owned:G.upgrades.gen>=3, cat:'СИСТЕМЫ',
+    buy:()=>buyUpgrade('gen')
+  });
+  items.push({
+    name:'АВТО-РЕМОНТ ШЛЮЗОВ', sub:G.upgrades.autoRepair?'Активно':'Пассивное восстановление',
+    price:350, owned:G.upgrades.autoRepair>0, cat:'СИСТЕМЫ',
+    buy:()=>buyUpgrade('autoRepair')
+  });
+  items.push({
+    name:'СКАНЕРЫ ДВИЖЕНИЯ', sub:'Показ прочности целей',
+    price:190, owned:G.upgrades.scanner>0, cat:'СИСТЕМЫ',
+    buy:()=>buyUpgrade('scanner')
+  });
+  return items;
+}
+
+/* ============================================================
+   ОБНОВЛЕНИЕ ИГРЫ
+   ============================================================ */
+function updateGame(dt){
+  const G = game;
+  if(!G || G.over) return;
+
+  G.time += dt;
+
+  // часы
+  const totalMin = G.time/60;
+  const hour = (22 + Math.floor(totalMin)) % 24;
+  const minute = Math.floor((totalMin % 1)*60);
+  G.clock = (hour<10?'0':'')+hour+':'+(minute<10?'0':'')+minute;
+
+  let prog;
+  if(G.mode==='endless') prog = Math.min(1, G.time/620);
+  else prog = Math.min(1, G.time/480);
+  G.progress = prog;
+  G.danger = 1 + Math.floor(prog*9);
+
+  if(G.mode!=='endless' && G.time >= 480){ finishGame(true); return; }
+
+  // таймеры
+  if(G.fireCd > 0) G.fireCd -= dt;
+  if(G.rebootCd > 0) G.rebootCd -= dt;
+  if(G.repairCd > 0) G.repairCd -= dt;
+  if(G.oxygenCd > 0) G.oxygenCd -= dt;
+  if(G.shake > 0) G.shake = Math.max(0, G.shake - dt*22);
+  if(G.flashRed > 0) G.flashRed = Math.max(0, G.flashRed - dt*2.4);
+
+  // энергия
+  let regen = 4.2 + G.upgrades.gen*1.6;
+  if(G.mode==='hardcore') regen *= 0.5;
+  let drain = 0.85 + G.turrets.length*0.62 + G.lasers.length*0.28 + (G.blocker?0.35:0);
+  G.energy = clamp(G.energy + (regen - drain)*dt, 0, G.energyMax);
+
+  // кислород
+  let oxyDrain = G.mode==='hardcore' ? 0.44 : 0.30;
+  if(G.energy <= 1) oxyDrain += 1.1;
+  G.oxygen -= oxyDrain*dt;
+  G.oxygen = clamp(G.oxygen, 0, 100);
+  if(G.oxygen <= 0){
+    G.coreHP -= 5.5*dt;
+    G.flashRed = Math.min(1, G.flashRed + dt*2);
+  }
+
+  // авто-ремонт
+  if(G.upgrades.autoRepair > 0){
+    for(const id of GATE_IDS){
+      const g = G.gates[id];
+      if(g.hp > 0 && g.hp < g.max) g.hp = clamp(g.hp + 1.4*dt, 0, g.max);
+    }
+  }
+
+  // спавн врагов
+  G.spawnTimer -= dt;
+  if(G.spawnTimer <= 0){
+    spawnEnemy();
+    let base = G.mode==='hardcore' ? 2.15 : 2.95;
+    let interval = lerp(base, 0.78, prog) * rnd(0.72,1.28);
+    if(G.mode==='hardcore') interval *= 0.78;
+    G.spawnTimer = Math.max(0.45, interval);
+  }
+
+  // враги
+  const coreStop = 84;
+  for(let i=0;i<enemyPool.length;i++){
+    const e = enemyPool[i];
+    if(!e.active) continue;
+
+    e.anim += dt;
+    if(e.flash > 0) e.flash -= dt;
+    if(e.slow > 0) e.slow -= dt;
+    if(e.spawnT > 0){ e.spawnT -= dt; }
+
+    // стелс
+    if(e.type === 'stealth'){
+      e.cloakT -= dt;
+      if(e.cloakT <= 0){
+        e.cloaked = !e.cloaked;
+        e.cloakT = e.cloaked ? rnd(1.1,1.8) : rnd(2.2,3.2);
+      }
+    }
+
+    const gd = GATE_DATA[e.gateId];
+    const gate = G.gates[e.gateId];
+
+    let tx, ty, targetKind;
+
+    if(!e.inside){
+      if(gate.hp > 0){
+        tx = gd.breach.x; ty = gd.breach.y; targetKind = 'gate';
+      } else {
+        e.inside = true;
+        targetKind = 'core';
+        tx = CORE.x; ty = CORE.y;
+      }
+    } else {
+      targetKind = 'core';
+      tx = CORE.x; ty = CORE.y;
+    }
+
+    if(targetKind === 'core'){
+      const d = dist(e.x,e.y,CORE.x,CORE.y);
+      if(d <= coreStop){
+        // атака ядра
+        e.atkCd -= dt;
+        if(e.atkCd <= 0){
+          e.atkCd = e.atk;
+          G.coreHP -= e.dmg;
+          G.shake = Math.min(9, G.shake + 2.2);
+          G.flashRed = Math.min(1, G.flashRed + 0.35);
+          burst(e.x, e.y, 5, '#ff4a4a', 130, 2.4);
+          Snd.coreHit();
+          if(G.coreHP <= 0){ G.coreHP = 0; finishGame(false); return; }
+        }
+      } else {
+        const spd = e.speed * (e.slow>0 ? 0.45 : 1);
+        const dx = CORE.x-e.x, dy = CORE.y-e.y;
+        const step = Math.min(d - coreStop, spd*dt);
+        e.x += dx/d*step; e.y += dy/d*step;
+        e.angle = Math.atan2(dy,dx);
+      }
+    } else {
+      const d = dist(e.x,e.y,tx,ty);
+      if(d <= 3){
+        e.atkCd -= dt;
+        if(e.atkCd <= 0){
+          e.atkCd = e.atk;
+          let dmg = e.dmg;
+          if(G.blocker) dmg *= 0.55;
+          gate.hp -= dmg;
+          burst(e.x, e.y, 4, '#ffae4a', 110, 2.2);
+          Snd.hit();
+          if(gate.hp <= 0){
+            gate.hp = 0;
+            if(!gate.broken){
+              gate.broken = true;
+              Snd.gateBreak();
+              G.shake = 12;
+              burst(gd.cx, gd.cy, 26, '#ff5a3b', 220, 3.4);
+            }
+          }
+        }
+      } else {
+        const spd = e.speed * (e.slow>0 ? 0.45 : 1);
+        const dx = tx-e.x, dy = ty-e.y;
+        const step = Math.min(d, spd*dt);
+        e.x += dx/d*step; e.y += dy/d*step;
+        e.angle = Math.atan2(dy,dx);
+      }
+    }
+
+    // электро-блокиратор
+    if(G.blocker && !e.inside){
+      e.slow = Math.max(e.slow, 0.1);
+    }
+  }
+
+  // восстановление шлюзов
+  for(const id of GATE_IDS){
+    const g = G.gates[id];
+    if(g.hp > 0 && g.broken) g.broken = false;
+  }
+
+  // турели
+  for(let i=0;i<G.turrets.length;i++){
+    const t = G.turrets[i];
+    t.cd -= dt;
+    if(t.cd > 0) continue;
+    let best = null, bestD = 300*300;
+    for(let j=0;j<enemyPool.length;j++){
+      const e = enemyPool[j];
+      if(!e.active || e.cloaked) continue;
+      const d = dist2(e.x,e.y,t.x,t.y);
+      if(d < bestD){ bestD = d; best = e; }
+    }
+    if(best && G.energy >= 1.6){
+      t.cd = 0.42;
+      t.angle = Math.atan2(best.y-t.y, best.x-t.x);
+      G.energy -= 1.6;
+      spawnBeam(t.x, t.y, best.x, best.y, '#7fe9ff', 1.6, 0.1);
+      damageEnemy(best, 13, '#7fe9ff');
+      Snd.turret();
+    }
+  }
+
+  // лазерные растяжки
+  for(let i=0;i<G.lasers.length;i++){
+    const l = G.lasers[i];
+    l.cd -= dt;
+    if(l.cd > 0) continue;
+    l.cd = 0.55;
+    const gd = GATE_DATA[l.gateId];
+    for(let j=0;j<enemyPool.length;j++){
+      const e = enemyPool[j];
+      if(!e.active) continue;
+      if(dist2(e.x,e.y,gd.cx,gd.cy) < 120*120){
+        damageEnemy(e, 9, '#ff4a9a');
+      }
+    }
+    burst(gd.cx, gd.cy, 4, '#ff4a9a', 80, 2);
+  }
+
+  // звук тревоги / сердцебиение
+  G.alarmT -= dt;
+  const critical = G.coreHP < 45 || G.oxygen < 20;
+  const breached = GATE_IDS.some(id=>G.gates[id].hp<=0);
+  if((critical || breached) && G.alarmT <= 0){
+    G.alarmT = 2.2;
+    Snd.alarmBeep();
+  }
+
+  G.heartbeatT -= dt;
+  if(G.heartbeatT <= 0 && (G.coreHP < 55 || G.oxygen < 30)){
+    G.heartbeatT = G.coreHP < 25 ? 0.75 : 1.25;
+    Snd.heartbeat();
+  }
+
+  if(G.coreHP <= 0){ G.coreHP = 0; finishGame(false); }
+}
+
+/* ============================================================
+   ОБНОВЛЕНИЕ ЭФФЕКТОВ
+   ============================================================ */
+function updateEffects(dt){
+  for(let i=0;i<particlePool.length;i++){
+    const p = particlePool[i];
+    if(!p.active) continue;
+    p.life -= dt;
+    if(p.life <= 0){ p.active = false; continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vx *= Math.pow(p.drag, dt*60);
+    p.vy *= Math.pow(p.drag, dt*60);
+    p.vy += 12*dt;
+  }
+  for(let i=0;i<beamPool.length;i++){
+    const b = beamPool[i];
+    if(!b.active) continue;
+    b.life -= dt;
+    if(b.life <= 0) b.active = false;
+  }
+}
+
+/* ============================================================
+   ОТРИСОВКА: МИР
+   ============================================================ */
+function roomStatusColor(id){
+  const G = game;
+  if(!G) return '#39d4ff';
+  if(id === 'core'){
+    if(G.coreHP < 30) return '#ff3b3b';
+    if(G.coreHP < 60) return '#ff9a3b';
+    return '#39d4ff';
+  }
+  if(id === 'gen') return G.energy > 22 ? '#ffcf4a' : '#ff5a5a';
+  if(id === 'oxy') return G.oxygen > 28 ? '#4affd0' : '#ff5a5a';
+  if(id === 'arm') return '#ffa54a';
+  const g = G.gates[id];
+  if(!g) return '#39d4ff';
+  if(g.hp <= 0) return '#ff3b3b';
+  if(g.hp < 35) return '#ff8a3b';
+  return '#3bff9e';
+}
+
+function drawRoomStates(){
+  const G = game;
+  const pulse = 0.55 + 0.45*Math.sin(T*3.2);
+  for(const id in ROOMS){
+    const r = ROOMS[id];
+    const col = roomStatusColor(id);
+    ctx.save();
+    ctx.globalAlpha = 0.10 + 0.06*pulse;
+    ctx.fillStyle = col;
+    rr(ctx, r.x, r.y, r.w, r.h, 8); ctx.fill();
+    ctx.globalAlpha = 0.55 + 0.25*pulse;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    rr(ctx, r.x, r.y, r.w, r.h, 8); ctx.stroke();
+    ctx.restore();
+  }
+
+  // выделение выбранного сектора
+  if(G){
+    const sec = SECTORS[G.sector];
+    if(sec){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(120,230,255,'+(0.45+0.25*Math.sin(T*4))+')';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8,6]);
+      for(const rid of sec.rooms){
+        const r = ROOMS[rid];
+        rr(ctx, r.x-6, r.y-6, r.w+12, r.h+12, 10);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+}
+
+function drawCore(){
+  const G = game;
+  const pulse = 0.6 + 0.4*Math.sin(T*2.6);
+  const hpRatio = G ? G.coreHP/100 : 1;
+
+  ctx.save();
+  ctx.translate(CORE.x, CORE.y);
+
+  const grad = ctx.createRadialGradient(0,0,4,0,0,64);
+  grad.addColorStop(0,'rgba(80,220,255,'+(0.30*pulse)+')');
+  grad.addColorStop(1,'rgba(80,220,255,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(0,0,64,0,TAU); ctx.fill();
+
+  // кольца
+  ctx.strokeStyle = 'rgba(90,210,255,'+(0.5+0.3*pulse)+')';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0,0,36,0,TAU); ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(90,210,255,0.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0,0,46, T*0.8, T*0.8 + Math.PI*1.3); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0,0,28, -T*1.2, -T*1.2 + Math.PI*0.9); ctx.stroke();
+
+  // ядро
+  const coreCol = hpRatio > 0.6 ? '#39d4ff' : (hpRatio > 0.3 ? '#ffa53b' : '#ff3b3b');
+  ctx.fillStyle = coreCol;
+  ctx.beginPath(); ctx.arc(0,0,14,0,TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath(); ctx.arc(-3,-3,5,0,TAU); ctx.fill();
+
+  // оператор
+  ctx.fillStyle = '#9fe8ff';
+  ctx.beginPath(); ctx.arc(0, 42, 5, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(159,232,255,0.5)';
+  ctx.beginPath(); ctx.arc(0, 42, 8, 0, TAU); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawTrapsAndTurrets(){
+  const G = game;
+  if(!G) return;
+
+  // турели
+  for(const t of G.turrets){
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.angle);
+    ctx.fillStyle = '#1a2634';
+    ctx.beginPath(); ctx.arc(0,0,9,0,TAU); ctx.fill();
+    ctx.strokeStyle = '#5ad1ff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0,0,9,0,TAU); ctx.stroke();
+    ctx.fillStyle = '#7fe9ff';
+    ctx.fillRect(4,-2,12,4);
+    ctx.restore();
+    // индикатор
+    ctx.fillStyle = 'rgba(90,209,255,'+(0.4+0.4*Math.sin(T*5))+')';
+    ctx.beginPath(); ctx.arc(t.x, t.y, 3, 0, TAU); ctx.fill();
+  }
+
+  // лазеры
+  for(const l of G.lasers){
+    const gd = GATE_DATA[l.gateId];
+    const r = ROOMS[l.gateId];
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.25*Math.sin(T*6 + gd.cx);
+    ctx.strokeStyle = '#ff4a9a';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(r.x+8, gd.cy); ctx.lineTo(r.x+r.w-8, gd.cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(gd.cx, r.y+8); ctx.lineTo(gd.cx, r.y+r.h-8);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // блокиратор
+  if(G.blocker){
+    for(const id of GATE_IDS){
+      const r = ROOMS[id];
+      ctx.save();
+      ctx.globalAlpha = 0.18 + 0.10*Math.sin(T*4.5);
+      ctx.fillStyle = '#5affd0';
+      rr(ctx, r.x, r.y, r.w, r.h, 8); ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function drawEnemy(e){
+  const flash = e.flash > 0;
+  const alpha = e.cloaked ? 0.15 : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(e.x, e.y);
+  const s = e.size;
+
+  if(e.type === 'parasite'){
+    ctx.rotate(e.angle);
+    ctx.fillStyle = flash ? '#ffffff' : e.color;
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(-s*0.75, s*0.7);
+    ctx.lineTo(-s*0.35, 0);
+    ctx.lineTo(-s*0.75, -s*0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = flash ? '#ffffff' : e.color;
+    ctx.lineWidth = 1.4;
+    const w = Math.sin(e.anim*14)*3;
+    ctx.beginPath();
+    ctx.moveTo(-s*0.2, s*0.5); ctx.lineTo(-s*0.9, s*0.95+w);
+    ctx.moveTo(-s*0.2,-s*0.5); ctx.lineTo(-s*0.9,-s*0.95-w);
+    ctx.stroke();
+  }
+  else if(e.type === 'drone'){
+    ctx.rotate(e.anim*0.9);
+    ctx.fillStyle = flash ? '#ffffff' : e.color;
+    ctx.beginPath();
+    for(let i=0;i<6;i++){
+      const a = i/6*TAU;
+      const px = Math.cos(a)*s, py = Math.sin(a)*s;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#1a1208'; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for(let i=0;i<3;i++){
+      const a = i/3*TAU + e.anim*2;
+      const px = Math.cos(a)*s*0.5, py = Math.sin(a)*s*0.5;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = '#2a1c0c';
+    ctx.beginPath(); ctx.arc(0,0,s*0.28,0,TAU); ctx.fill();
+  }
+  else if(e.type === 'stealth'){
+    ctx.rotate(e.anim*1.6);
+    ctx.fillStyle = flash ? '#ffffff' : e.color;
+    ctx.beginPath();
+    ctx.moveTo(s,0); ctx.lineTo(0,s); ctx.lineTo(-s,0); ctx.lineTo(0,-s);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = flash ? '#ffffff' : 'rgba(200,160,255,0.8)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(0,0,s*1.5,e.anim*3, e.anim*3+2.1); ctx.stroke();
+  }
+  else if(e.type === 'brute'){
+    ctx.rotate(e.anim*0.5);
+    ctx.fillStyle = flash ? '#ffffff' : e.color;
+    ctx.beginPath(); ctx.arc(0,0,s,0,TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(20,8,8,0.55)';
+    for(let i=0;i<5;i++){
+      const a = i/5*TAU;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.fillRect(-3, -s-2, 6, 8);
+      ctx.restore();
+    }
+    ctx.fillStyle = '#2a0c0c';
+    ctx.beginPath(); ctx.arc(0,0,s*0.35,0,TAU); ctx.fill();
+  }
+  ctx.restore();
+
+  // полоска здоровья
+  if(!e.cloaked && (e.hp < e.maxHp || (game && game.upgrades.scanner))){
+    const w = Math.max(16, e.size*2.6);
+    const x = e.x - w/2, y = e.y - e.size - 10;
+    const p = clamp(e.hp/e.maxHp, 0, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x-1, y-1, w+2, 5);
+    ctx.fillStyle = p > 0.6 ? '#3bff9e' : (p > 0.3 ? '#ffcf4a' : '#ff3b3b');
+    ctx.fillRect(x, y, w*p, 3);
+  }
+}
+
+function drawEnemies(){
+  for(let i=0;i<enemyPool.length;i++){
+    const e = enemyPool[i];
+    if(!e.active) continue;
+    drawEnemy(e);
+  }
+}
+
+function drawBeams(){
+  ctx.save();
+  ctx.lineCap = 'round';
+  for(let i=0;i<beamPool.length;i++){
+    const b = beamPool[i];
+    if(!b.active) continue;
+    const a = clamp(b.life/b.maxLife, 0, 1);
+    ctx.globalAlpha = a*0.95;
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = b.width*a + 0.6;
+    ctx.beginPath();
+    ctx.moveTo(b.x1,b.y1); ctx.lineTo(b.x2,b.y2);
+    ctx.stroke();
+    ctx.globalAlpha = a*0.5;
+    ctx.lineWidth = b.width*a*2.4 + 1;
+    ctx.strokeStyle = b.color;
+    ctx.beginPath();
+    ctx.moveTo(b.x1,b.y1); ctx.lineTo(b.x2,b.y2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawParticles(){
+  ctx.save();
+  for(let i=0;i<particlePool.length;i++){
+    const p = particlePool[i];
+    if(!p.active) continue;
+    const a = clamp(p.life/p.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    const s = p.size*a;
+    ctx.fillRect(p.x - s*0.5, p.y - s*0.5, s, s);
+  }
+  ctx.restore();
+}
+
+/* ============================================================
+   HUD
+   ============================================================ */
+function drawPanel(x,y,w,h,title){
+  ctx.fillStyle = 'rgba(6,12,20,0.88)';
+  rr(ctx,x,y,w,h,5); ctx.fill();
+  ctx.strokeStyle = 'rgba(58,130,175,0.5)';
+  ctx.lineWidth = 1;
+  rr(ctx,x,y,w,h,5); ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(90,200,255,0.7)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x+4, y+14); ctx.lineTo(x+4, y+4); ctx.lineTo(x+18, y+4);
+  ctx.moveTo(x+w-18, y+h-4); ctx.lineTo(x+w-4, y+h-4); ctx.lineTo(x+w-4, y+h-14);
+  ctx.stroke();
+
+  if(title) txt(title, x+12, y+16, 11, 'rgba(120,205,240,0.95)', 'left', 'bold');
+}
+
+function drawBar(x,y,w,h,val,max,color,label,showVal){
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(x,y,w,h);
+  const p = clamp(val/max, 0, 1);
+  ctx.fillStyle = color;
+  ctx.fillRect(x,y,w*p,h);
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x+0.5, y+0.5, w-1, h-1);
+  if(label) txt(label, x, y-7, 10, 'rgba(150,190,215,0.9)');
+  if(showVal) txt(Math.round(val)+'%', x+w, y-7, 10, 'rgba(200,230,245,0.9)', 'right');
+}
+
+function drawHUD(){
+  const G = game;
+  if(!G) return;
+
+  // верхняя панель
+  ctx.fillStyle = 'rgba(5,10,16,0.90)';
+  ctx.fillRect(0,0,VW,46);
+  ctx.strokeStyle = 'rgba(50,120,165,0.6)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,46.5); ctx.lineTo(VW,46.5); ctx.stroke();
+
+  txt('СМЕНА ' + G.clock, 18, 23, 17, '#7fe9ff', 'left', 'bold');
+  const modeName = G.mode==='survival' ? 'ВЫЖИВАНИЕ'
+                 : G.mode==='hardcore' ? 'ХАРДКОР / БЛЭКАУТ'
+                 : 'БЕСКОНЕЧНЫЙ РЕЖИМ';
+  txt(modeName, 190, 23, 12, 'rgba(130,190,225,0.9)');
+
+  // индикатор опасности
+  const dx = 470;
+  txt('УРОВЕНЬ ОПАСНОСТИ', dx, 15, 9, 'rgba(150,190,215,0.8)');
+  for(let i=0;i<10;i++){
+    const on = i < G.danger;
+    ctx.fillStyle = on ? (G.danger>7?'#ff3b3b':(G.danger>4?'#ffb03b':'#3bff9e')) : 'rgba(255,255,255,0.10)';
+    ctx.fillRect(dx + i*17, 25, 13, 9);
+  }
+
+  // кнопки
+  const btn = (x,y,w,h,label,fn,col) => {
+    const hv = inRect(mouse.x,mouse.y,x,y,w,h);
+    ctx.fillStyle = hv ? 'rgba(30,70,100,0.95)' : 'rgba(14,26,38,0.95)';
+    rr(ctx,x,y,w,h,4); ctx.fill();
+    ctx.strokeStyle = hv ? 'rgba(120,220,255,0.95)' : (col||'rgba(70,130,170,0.7)');
+    ctx.lineWidth = 1.4;
+    rr(ctx,x,y,w,h,4); ctx.stroke();
+    txt(label, x+w/2, y+h/2+1, 12, hv?'#d8f4ff':'#9fd0e8', 'center', 'bold');
+    addZone(x,y,w,h,fn);
+  };
+
+  btn(1020, 8, 118, 30, 'МАГАЗИН [B]', ()=>{ screen='shop'; Snd.click(); });
+  btn(1148, 8, 116, 30, 'ПАУЗА [ESC]', ()=>{ screen='pause'; Snd.click(); });
+
+  // правая панель ресурсов
+  const px = 962, py = 54, pw = 308, ph = 250;
+  drawPanel(px, py, pw, ph, 'СИСТЕМЫ ЖИЗНЕОБЕСПЕЧЕНИЯ');
+
+  drawBar(px+14, py+48, pw-28, 13, G.energy, G.energyMax, '#ffcf4a', 'ЭНЕРГИЯ (кВт)', true);
+  drawBar(px+14, py+90, pw-28, 13, G.oxygen, 100, G.oxygen>30?'#4affd0':'#ff5a5a', 'КИСЛОРОД (%)', true);
+  drawBar(px+14, py+132, pw-28, 13, G.coreHP, 100, G.coreHP>60?'#39d4ff':(G.coreHP>30?'#ffa53b':'#ff3b3b'), 'ПРОЧНОСТЬ ЯДРА (%)', true);
+
+  txt('КРЕДИТЫ', px+14, py+180, 10, 'rgba(150,190,215,0.9)');
+  txt('$ ' + Math.floor(G.credits), px+14, py+200, 19, '#8dffb0', 'left', 'bold');
+
+  // статус шлюзов
+  let bx = px+150;
+  for(const id of GATE_IDS){
+    const g = G.gates[id];
+    const col = g.hp<=0?'#ff3b3b':(g.hp<35?'#ff8a3b':'#3bff9e');
+    ctx.fillStyle = col;
+    ctx.fillRect(bx, py+180, 30, 8);
+    txt(GATE_DATA[id].label, bx+15, py+200, 10, col, 'center', 'bold');
+    bx += 38;
+  }
+
+  // левая панель — сектор
+  const lx = 10, ly = 54, lw = 210, lh = 250;
+  drawPanel(lx, ly, lw, lh, 'КАМЕРА ' + (G.sector+1));
+  const sec = SECTORS[G.sector];
+  txt(sec.name, lx+12, ly+40, 11, '#bde8ff', 'left', 'bold');
+
+  let threatCount = 0;
+  let inSector = 0;
+  for(let i=0;i<enemyPool.length;i++){
+    const e = enemyPool[i];
+    if(!e.active) continue;
+    threatCount++;
+    if(sec.id==='gates'){
+      if(e.gateId!=='vent') inSector++;
+    } else if(sec.id==='vent'){
+      if(e.gateId==='vent') inSector++;
+    }
+  }
+  txt('УГРОЗ В СЕКТОРЕ: ' + inSector, lx+12, ly+62, 11, inSector>0?'#ff8a8a':'#7fbfa0');
+  txt('ВСЕГО УГРОЗ: ' + threatCount, lx+12, ly+80, 11, 'rgba(160,200,225,0.9)');
+
+  // кнопки действий
+  const abtn = (x,y,w,h,label,fn,ready) => {
+    const hv = inRect(mouse.x,mouse.y,x,y,w,h);
+    ctx.fillStyle = ready ? (hv?'rgba(30,80,60,0.95)':'rgba(16,38,30,0.95)') : 'rgba(24,24,28,0.9)';
+    rr(ctx,x,y,w,h,4); ctx.fill();
+    ctx.strokeStyle = ready ? (hv?'rgba(110,255,180,0.95)':'rgba(60,160,110,0.7)') : 'rgba(70,70,80,0.6)';
+    ctx.lineWidth = 1.3;
+    rr(ctx,x,y,w,h,4); ctx.stroke();
+    txt(label, x+w/2, y+h/2+1, 10, ready?(hv?'#d8ffe8':'#8ee0b0'):'#5a6068', 'center', 'bold');
+    addZone(x,y,w,h,fn);
+  };
+
+  abtn(lx+12, ly+100, lw-24, 30, 'РЕМОНТ ШЛЮЗОВ [R]  -30Э', repairGates, G.energy>=30 && G.repairCd<=0);
+  abtn(lx+12, ly+138, lw-24, 30, 'ПОДАЧА КИСЛОРОДА [F]  -16Э', boostOxygen, G.energy>=16 && G.oxygenCd<=0);
+  abtn(lx+12, ly+176, lw-24, 30, 'ПЕРЕЗАГРУЗКА [ПРОБЕЛ]', rebootEnergy, G.rebootCd<=0);
+  if(G.rebootCd > 0){
+    txt('ПЕРЕЗАРЯДКА ' + G.rebootCd.toFixed(1) + 'с', lx+12, ly+222, 10, 'rgba(255,180,90,0.9)');
+  } else {
+    txt('ГОТОВО К ПЕРЕЗАГРУЗКЕ', lx+12, ly+222, 10, 'rgba(120,220,255,0.8)');
+  }
+
+  // нижняя панель оружия
+  ctx.fillStyle = 'rgba(5,10,16,0.90)';
+  ctx.fillRect(0, 664, VW, 56);
+  ctx.strokeStyle = 'rgba(50,120,165,0.6)';
+  ctx.beginPath(); ctx.moveTo(0,663.5); ctx.lineTo(VW,663.5); ctx.stroke();
+
+  for(let i=0;i<WEAPONS.length;i++){
+    const w = WEAPONS[i];
+    const x = 20 + i*188, y = 670, ww = 178, hh = 44;
+    const unlocked = G.unlocked[i];
+    const active = G.weapon === i;
+    const hv = inRect(mouse.x,mouse.y,x,y,ww,hh);
+
+    ctx.fillStyle = active ? 'rgba(25,60,85,0.98)' : (unlocked ? (hv?'rgba(18,36,52,0.98)':'rgba(10,20,30,0.95)') : 'rgba(14,14,18,0.9)');
+    rr(ctx,x,y,ww,hh,4); ctx.fill();
+    ctx.strokeStyle = active ? 'rgba(120,225,255,1)' : (unlocked?'rgba(60,120,160,0.7)':'rgba(60,60,70,0.5)');
+    ctx.lineWidth = active ? 2 : 1.2;
+    rr(ctx,x,y,ww,hh,4); ctx.stroke();
+
+    ctx.fillStyle = unlocked ? w.color : '#404450';
+    ctx.fillRect(x+8, y+9, 4, 26);
+
+    txt(w.name, x+20, y+16, 11, unlocked?(active?'#d8f4ff':'#a8cfe6'):'#50555f', 'left', 'bold');
+    txt(unlocked ? ('УРОН ' + w.dmg + '  ЗАРЯД ' + w.cost) : 'НЕ КУПЛЕНО', x+20, y+32, 9,
+        unlocked?'rgba(140,180,205,0.9)':'#4a4f58');
+
+    if(active && G.fireCd > 0){
+      const p = clamp(1 - G.fireCd/w.cd, 0, 1);
+      ctx.fillStyle = 'rgba(120,225,255,0.55)';
+      ctx.fillRect(x+2, y+hh-4, (ww-4)*p, 2);
+    }
+    addZone(x,y,ww,hh,()=>{
+      if(unlocked){ G.weapon = i; Snd.click(); }
+      else { Snd.err(); screen='shop'; }
+    });
+  }
+
+  // подсказки
+  txt('ЛКМ — огонь   Q/E — оружие   1-6 — камеры   B — магазин   ESC — пауза',
+      VW-20, 690, 10, 'rgba(130,170,195,0.75)', 'right');
+
+  // красный флеш
+  if(G.flashRed > 0){
+    ctx.save();
+    ctx.globalAlpha = G.flashRed*0.35;
+    ctx.fillStyle = '#ff1a1a';
+    ctx.fillRect(0,0,VW,VH);
+    ctx.restore();
+  }
+}
+
+/* ============================================================
+   ОТРИСОВКА ИГРЫ
+   ============================================================ */
+function renderGame(){
+  const G = game;
+  ctx.save();
+  if(G && G.shake > 0){
+    ctx.translate(rnd(-G.shake,G.shake), rnd(-G.shake,G.shake));
+  }
+  ctx.drawImage(bgCanvas,0,0);
+  drawRoomStates();
+  drawCore();
+  drawTrapsAndTurrets();
+  drawEnemies();
+  drawBeams();
+  drawParticles();
+  ctx.restore();
+
+  drawHUD();
+
+  if(settings.crt) drawCRTOverlay(0.25);
+}
+
+/* ============================================================
+   МЕНЮ
+   ============================================================ */
+function drawMenuBackground(){
+  ctx.fillStyle = '#05070a';
+  ctx.fillRect(0,0,VW,VH);
+
+  // мерцающие лампы
+  ctx.save();
+  for(let i=0;i<5;i++){
+    const x = 150 + i*250;
+    const y = 180 + (i%2)*260;
+    let flick = 0.55 + 0.35*Math.sin(menuT*2.3 + i*2.1);
+    if(Math.random() < 0.012) flick *= 0.15;
+    ctx.globalAlpha = flick;
+    ctx.drawImage(lightCanvas, x-160, y-160, 320, 320);
+  }
+  ctx.restore();
+
+  // линии перспективы
+  ctx.save();
+  ctx.strokeStyle = 'rgba(40,110,150,0.16)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let i=0;i<26;i++){
+    const x = i*(VW/25);
+    ctx.moveTo(x, VH);
+    ctx.lineTo(VW/2 + (x-VW/2)*0.15, 320);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // сетка
+  ctx.save();
+  ctx.strokeStyle = 'rgba(35,80,110,0.14)';
+  ctx.beginPath();
+  for(let x=0;x<=VW;x+=48){ ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,VH); }
+  for(let y=0;y<=VH;y+=48){ ctx.moveTo(0,y+0.5); ctx.lineTo(VW,y+0.5); }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMenuButtons(){
+  const btns = [
+    { label:'НАЧАТЬ СМЕНУ',        fn:()=>{ Snd.click(); startGame(modeChoice); } },
+    { label:'ВЫБОР СЛОЖНОСТИ',     fn:()=>{ Snd.click(); screen='modes'; } },
+    { label:'НАСТРОЙКИ',           fn:()=>{ Snd.click(); screen='settings'; } },
+    { label:'СПРАВКА ПО УПРАВЛЕНИЮ', fn:()=>{ Snd.click(); screen='help'; } }
+  ];
+  const w = 400, h = 52, x = VW/2 - w/2;
+  let y = 400;
+  for(const b of btns){
+    const hv = inRect(mouse.x,mouse.y,x,y,w,h);
+    ctx.fillStyle = hv ? 'rgba(24,60,86,0.95)' : 'rgba(10,20,30,0.88)';
+    rr(ctx,x,y,w,h,4); ctx.fill();
+    ctx.strokeStyle = hv ? 'rgba(120,225,255,0.95)' : 'rgba(60,120,160,0.65)';
+    ctx.lineWidth = hv ? 2 : 1.2;
+    rr(ctx,x,y,w,h,4); ctx.stroke();
+
+    if(hv){
+      ctx.fillStyle = 'rgba(120,225,255,0.9)';
+      ctx.fillRect(x+6, y+12, 3, h-24);
+    }
+    txt(b.label, x+w/2, y+h/2+1, 16, hv?'#dcf6ff':'#9fcde6', 'center', 'bold');
+    addZone(x,y,w,h,b.fn);
+    y += h + 16;
+  }
+}
+
+function renderMenu(){
+  drawMenuBackground();
+
+  // заголовок
+  const glitch = Math.random() < 0.04 ? rnd(-4,4) : 0;
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  txt('НОЧНАЯ СМЕНА', VW/2 + 3 + glitch, 178, 62, '#1f6f9e', 'center', 'bold');
+  ctx.restore();
+  txt('НОЧНАЯ СМЕНА', VW/2 + glitch, 175, 62, '#bdeaff', 'center', 'bold');
+
+  txt('С Е К Т О Р - 9', VW/2, 232, 30, '#5ad1ff', 'center', 'bold');
+
+  ctx.strokeStyle = 'rgba(90,200,255,0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(VW/2-260, 258); ctx.lineTo(VW/2+260, 258);
+  ctx.stroke();
+
+  txt('ПОДЗЕМНЫЙ КОМПЛЕКС • НОЧНАЯ ВАХТА • ОПЕРАТОР СЕКТОРА-9', VW/2, 280, 11,
+      'rgba(130,180,210,0.75)', 'center');
+
+  drawMenuButtons();
+
+  // режим по умолчанию
+  const modeNames = { survival:'ВЫЖИВАНИЕ', hardcore:'ХАРДКОР / БЛЭКАУТ', endless:'БЕСКОНЕЧНЫЙ' };
+  txt('ТЕКУЩИЙ РЕЖИМ: ' + modeNames[modeChoice], VW/2, 356, 11, 'rgba(140,200,230,0.85)', 'center');
+
+  // рекорд
+  const best = bestRecord();
+  txt('ЛУЧШИЙ РЕЗУЛЬТАТ (БЕСКОНЕЧНЫЙ): ' + formatTime(best), VW/2, VH-64, 11,
+      'rgba(120,180,210,0.7)', 'center');
+  txt('v1.0 • ВСЕ СИСТЕМЫ В НОРМЕ', VW/2, VH-38, 10, 'rgba(90,130,160,0.6)', 'center');
+
+  if(settings.crt) drawCRTOverlay(0.5);
+}
+
+function formatTime(sec){
+  const m = Math.floor(sec/60);
+  const s = Math.floor(sec%60);
+  return (m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+}
+
+/* ---------- ЭКРАН РЕЖИМОВ ---------- */
+function renderModes(){
+  drawMenuBackground();
+  txt('ВЫБОР СЛОЖНОСТИ', VW/2, 92, 28, '#bdeaff', 'center', 'bold');
+  txt('РЕЖИМ ОПРЕДЕЛЯЕТ УСЛОВИЯ СМЕНЫ', VW/2, 124, 11, 'rgba(130,180,210,0.75)', 'center');
+
+  const modes = [
+    { id:'survival', title:'ВЫЖИВАНИЕ', desc:['Классическая смена с 22:00 до 06:00.','Длительность: 8 игровых минут.','Опасность растёт с каждой минутой.'], col:'#39d4ff' },
+    { id:'hardcore', title:'ХАРДКОР / БЛЭКАУТ', desc:['Генератор повреждён.','Энергия восстанавливается вдвое медленнее.','Враги быстрее и агрессивнее.'], col:'#ff5a5a' },
+    { id:'endless',  title:'БЕСКОНЕЧНЫЙ РЕЖИМ', desc:['Свободная смена без ограничения по времени.','Волны врагов нарастают.','Рекорд сохраняется локально.'], col:'#8dffb0' }
+  ];
+
+  const cw = 360, ch = 340, gap = 30;
+  const totalW = cw*3 + gap*2;
+  let x = VW/2 - totalW/2;
+  const y = 180;
+
+  for(const m of modes){
+    const sel = modeChoice === m.id;
+    const hv = inRect(mouse.x,mouse.y,x,y,cw,ch);
+
+    ctx.fillStyle = sel ? 'rgba(20,46,66,0.96)' : (hv?'rgba(14,28,42,0.94)':'rgba(8,16,24,0.9)');
+    rr(ctx,x,y,cw,ch,6); ctx.fill();
+    ctx.strokeStyle = sel ? m.col : (hv?'rgba(90,170,220,0.8)':'rgba(50,100,140,0.6)');
+    ctx.lineWidth = sel ? 2.4 : 1.2;
+    rr(ctx,x,y,cw,ch,6); ctx.stroke();
+
+    ctx.fillStyle = m.col;
+    ctx.fillRect(x+20, y+26, cw-40, 3);
+
+    txt(m.title, x+cw/2, y+68, 19, sel?m.col:'#a8cfe6', 'center', 'bold');
+
+    let ty = y+110;
+    for(const line of m.desc){
+      txt(line, x+22, ty, 11, 'rgba(160,200,225,0.9)');
+      ty += 22;
+    }
+
+    if(m.id === 'endless'){
+      txt('РЕКОРД: ' + formatTime(bestRecord()), x+22, y+ch-58, 11, 'rgba(141,255,176,0.9)');
+    }
+
+    const bx = x+20, by = y+ch-44, bw = cw-40, bh = 32;
+    const bhv = inRect(mouse.x,mouse.y,bx,by,bw,bh);
+    ctx.fillStyle = sel ? (bhv?'rgba(40,110,80,0.98)':'rgba(24,66,50,0.98)') : (bhv?'rgba(24,50,70,0.98)':'rgba(14,26,38,0.95)');
+    rr(ctx,bx,by,bw,bh,4); ctx.fill();
+    ctx.strokeStyle = sel ? m.col : 'rgba(70,130,170,0.7)';
+    ctx.lineWidth = 1.4;
+    rr(ctx,bx,by,bw,bh,4); ctx.stroke();
+    txt(sel ? 'ВЫБРАНО' : 'ВЫБРАТЬ', bx+bw/2, by+bh/2+1, 12, sel?m.col:'#9fd0e8', 'center', 'bold');
+
+    addZone(x,y,cw,ch,()=>{ modeChoice = m.id; Snd.click(); });
+    addZone(bx,by,bw,bh,()=>{ modeChoice = m.id; Snd.click(); });
+
+    x += cw + gap;
+  }
+
+  // назад / начать
+  const bw2 = 240, bh2 = 46;
+  const bx1 = VW/2 - bw2 - 20, bx2 = VW/2 + 20, by2 = 580;
+
+  let hv = inRect(mouse.x,mouse.y,bx1,by2,bw2,bh2);
+  ctx.fillStyle = hv?'rgba(24,50,70,0.98)':'rgba(10,20,30,0.9)';
+  rr(ctx,bx1,by2,bw2,bh2,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(120,225,255,0.9)':'rgba(60,120,160,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,bx1,by2,bw2,bh2,4); ctx.stroke();
+  txt('НАЗАД', bx1+bw2/2, by2+bh2/2+1, 14, hv?'#dcf6ff':'#9fcde6', 'center', 'bold');
+  addZone(bx1,by2,bw2,bh2,()=>{ Snd.click(); screen='menu'; });
+
+  hv = inRect(mouse.x,mouse.y,bx2,by2,bw2,bh2);
+  ctx.fillStyle = hv?'rgba(30,90,60,0.98)':'rgba(14,36,26,0.95)';
+  rr(ctx,bx2,by2,bw2,bh2,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(110,255,180,0.95)':'rgba(60,160,110,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,bx2,by2,bw2,bh2,4); ctx.stroke();
+  txt('НАЧАТЬ СМЕНУ', bx2+bw2/2, by2+bh2/2+1, 14, hv?'#d8ffe8':'#8ee0b0', 'center', 'bold');
+  addZone(bx2,by2,bw2,bh2,()=>{ Snd.click(); startGame(modeChoice); });
+
+  if(settings.crt) drawCRTOverlay(0.4);
+}
+
+/* ---------- НАСТРОЙКИ ---------- */
+function renderSettings(){
+  drawMenuBackground();
+  txt('НАСТРОЙКИ', VW/2, 92, 28, '#bdeaff', 'center', 'bold');
+
+  const px = VW/2 - 320, py = 160, pw = 640, ph = 380;
+  drawPanel(px, py, pw, ph, 'КОНФИГУРАЦИЯ СИСТЕМ');
+
+  // громкость
+  txt('ГРОМКОСТЬ ЗВУКА', px+30, py+70, 13, '#a8cfe6', 'left', 'bold');
+  const volX = px+30, volY = py+96, volW = pw-60;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillRect(volX, volY, volW, 16);
+  ctx.fillStyle = '#5ad1ff';
+  ctx.fillRect(volX, volY, volW*settings.volume, 16);
+  ctx.strokeStyle = 'rgba(120,220,255,0.7)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(volX+0.5, volY+0.5, volW-1, 15);
+  txt(Math.round(settings.volume*100)+'%', volX+volW, volY+34, 12, 'rgba(180,220,240,0.9)', 'right');
+
+  addZone(volX, volY-8, volW, 32, ()=>{});
+  // перетаскивание громкости
+  if(mouseDown && inRect(mouse.x, mouse.y-0, volX, volY-12, volW, 40)){
+    settings.volume = clamp((mouse.x-volX)/volW, 0, 1);
+    Snd.setVol(settings.volume);
+    Store.set('vol', settings.volume);
+  }
+
+  // CRT
+  const crtY = py+150;
+  txt('ЭФФЕКТ CRT / СКАНЛАЙНЫ', px+30, crtY, 13, '#a8cfe6', 'left', 'bold');
+  const tglX = px+pw-130, tglY = crtY-16, tglW = 100, tglH = 30;
+  let hv = inRect(mouse.x,mouse.y,tglX,tglY,tglW,tglH);
+  ctx.fillStyle = settings.crt ? 'rgba(30,90,60,0.95)' : 'rgba(40,30,30,0.95)';
+  rr(ctx,tglX,tglY,tglW,tglH,4); ctx.fill();
+  ctx.strokeStyle = settings.crt ? 'rgba(110,255,180,0.9)' : 'rgba(180,90,90,0.8)';
+  ctx.lineWidth = 1.4; rr(ctx,tglX,tglY,tglW,tglH,4); ctx.stroke();
+  txt(settings.crt?'ВКЛ':'ВЫКЛ', tglX+tglW/2, tglY+tglH/2+1, 13,
+      settings.crt?'#8dffb0':'#ff9a9a', 'center', 'bold');
+  addZone(tglX,tglY,tglW,tglH,()=>{
+    settings.crt = !settings.crt;
+    Store.set('crt', settings.crt);
+    Snd.click();
+  });
+
+  // качество частиц
+  const qY = py+230;
+  txt('ПЛОТНОСТЬ ЧАСТИЦ', px+30, qY, 13, '#a8cfe6', 'left', 'bold');
+  const qNames = ['НИЗКАЯ','СРЕДНЯЯ','ВЫСОКАЯ'];
+  for(let i=0;i<3;i++){
+    const qx = px+pw-320 + i*104, qw = 96, qh = 30;
+    const sel = settings.quality === i;
+    hv = inRect(mouse.x,mouse.y,qx,qY-16,qw,qh);
+    ctx.fillStyle = sel ? 'rgba(24,60,86,0.98)' : (hv?'rgba(18,36,52,0.95)':'rgba(10,20,30,0.9)');
+    rr(ctx,qx,qY-16,qw,qh,4); ctx.fill();
+    ctx.strokeStyle = sel ? '#5ad1ff' : 'rgba(60,120,160,0.6)';
+    ctx.lineWidth = sel?1.8:1.1;
+    rr(ctx,qx,qY-16,qw,qh,4); ctx.stroke();
+    txt(qNames[i], qx+qw/2, qY+1, 10, sel?'#dcf6ff':'#8fb6cf', 'center', 'bold');
+    addZone(qx,qY-16,qw,qh,()=>{
+      settings.quality = i;
+      Store.set('quality', i);
+      Snd.click();
+    });
+  }
+
+  txt('Настройки сохраняются в локальном хранилище браузера.', px+30, py+ph-46, 10,
+      'rgba(130,170,195,0.7)');
+
+  const bw = 240, bh = 46, bx = VW/2-bw/2, by = 580;
+  hv = inRect(mouse.x,mouse.y,bx,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(24,50,70,0.98)':'rgba(10,20,30,0.9)';
+  rr(ctx,bx,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(120,225,255,0.9)':'rgba(60,120,160,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,bx,by,bw,bh,4); ctx.stroke();
+  txt('НАЗАД', bx+bw/2, by+bh/2+1, 14, hv?'#dcf6ff':'#9fcde6', 'center', 'bold');
+  addZone(bx,by,bw,bh,()=>{ Snd.click(); screen='menu'; });
+
+  if(settings.crt) drawCRTOverlay(0.4);
+}
+
+/* ---------- СПРАВКА ---------- */
+function renderHelp(){
+  drawMenuBackground();
+  txt('СПРАВКА ПО УПРАВЛЕНИЮ', VW/2, 76, 26, '#bdeaff', 'center', 'bold');
+
+  const px = VW/2 - 460, py = 120, pw = 920, ph = 440;
+  drawPanel(px, py, pw, ph, 'ИНСТРУКЦИЯ ОПЕРАТОРА');
+
+  const left = [
+    ['ЛКМ', 'Огонь из текущего оружия по цели'],
+    ['Q / E', 'Переключение личного оружия'],
+    ['1 — 6', 'Быстрый выбор камеры / отсека'],
+    ['R', 'Аварийный ремонт шлюзов (-30 энергии)'],
+    ['F', 'Подача кислорода в бункер (-16 энергии)'],
+    ['ПРОБЕЛ', 'Перезагрузка генератора (+34 энергии)'],
+    ['B', 'Открыть арсенал и магазин'],
+    ['ESC', 'Пауза / выход из меню']
+  ];
+  const right = [
+    ['ЭНЕРГИЯ', 'Питает турели и системы. Без энергии падает кислород.'],
+    ['КИСЛОРОД', 'Медленно расходуется. При нуле ядро получает урон.'],
+    ['ШЛЮЗЫ', 'Держат врагов снаружи. При пробитии враги идут к ядру.'],
+    ['КРЕДИТЫ', 'Начисляются за уничтожение угроз.'],
+    ['ТУРЕЛИ', 'Автоматически стреляют по ближайшим врагам у шлюзов.'],
+    ['ЛОВУШКИ', 'Лазерные растяжки и электроблокираторы.'],
+    ['СТЕЛС', 'Стелс-особи невидимы для клика, когда маскируются.'],
+    ['СМЕНА', 'С 22:00 до 06:00 — 8 игровых минут.']
+  ];
+
+  let y = py+46;
+  for(const item of left){
+    txt(item[0], px+30, y, 12, '#7fe9ff', 'left', 'bold');
+    txt(item[1], px+130, y, 11, 'rgba(170,205,228,0.92)');
+    y += 26;
+  }
+  y = py+46;
+  for(const item of right){
+    txt(item[0], px+480, y, 12, '#8dffb0', 'left', 'bold');
+    txt(item[1], px+590, y, 11, 'rgba(170,205,228,0.92)');
+    y += 26;
+  }
+
+  const bw = 240, bh = 46, bx = VW/2-bw/2, by = 590;
+  const hv = inRect(mouse.x,mouse.y,bx,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(24,50,70,0.98)':'rgba(10,20,30,0.9)';
+  rr(ctx,bx,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(120,225,255,0.9)':'rgba(60,120,160,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,bx,by,bw,bh,4); ctx.stroke();
+  txt('НАЗАД', bx+bw/2, by+bh/2+1, 14, hv?'#dcf6ff':'#9fcde6', 'center', 'bold');
+  addZone(bx,by,bw,bh,()=>{ Snd.click(); screen='menu'; });
+
+  if(settings.crt) drawCRTOverlay(0.4);
+}
+
+/* ============================================================
+   ПАУЗА
+   ============================================================ */
+function renderPauseOverlay(){
+  ctx.fillStyle = 'rgba(3,7,12,0.86)';
+  ctx.fillRect(0,0,VW,VH);
+
+  const G = game;
+  const px = VW/2 - 330, py = 110, pw = 660, ph = 500;
+  drawPanel(px, py, pw, ph, 'СМЕНА ПРИОСТАНОВЛЕНА');
+  txt('ПАУЗА', VW/2, py+50, 30, '#bdeaff', 'center', 'bold');
+
+  const rows = [
+    ['ПРОЖИТО ВРЕМЕНИ', formatTime(G.time)],
+    ['СМЕНА', G.clock],
+    ['УНИЧТОЖЕНО УГРОЗ', String(G.stats.kills)],
+    ['ПОТРАЧЕНО ЭНЕРГИИ', Math.round(G.stats.energySpent) + ' кВт'],
+    ['КУПЛЕНО УЛУЧШЕНИЙ', String(G.stats.upgradesBought)],
+    ['ОТРЕМОНТИРОВАНО', String(G.stats.repairs)],
+    ['КРЕДИТЫ', '$ ' + Math.floor(G.credits)]
+  ];
+  let y = py+110;
+  for(const r of rows){
+    txt(r[0], px+50, y, 12, 'rgba(150,190,215,0.9)');
+    txt(r[1], px+pw-50, y, 13, '#bde8ff', 'right', 'bold');
+    y += 30;
+  }
+
+  const bw = 200, bh = 44;
+  const b1x = VW/2 - bw - 10, b2x = VW/2 + 10, by = py+ph-70;
+
+  let hv = inRect(mouse.x,mouse.y,b1x,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(30,90,60,0.98)':'rgba(14,36,26,0.95)';
+  rr(ctx,b1x,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(110,255,180,0.95)':'rgba(60,160,110,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,b1x,by,bw,bh,4); ctx.stroke();
+  txt('ПРОДОЛЖИТЬ', b1x+bw/2, by+bh/2+1, 13, hv?'#d8ffe8':'#8ee0b0', 'center', 'bold');
+  addZone(b1x,by,bw,bh,()=>{ Snd.click(); screen='game'; });
+
+  hv = inRect(mouse.x,mouse.y,b2x,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(70,30,30,0.98)':'rgba(30,14,14,0.95)';
+  rr(ctx,b2x,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(255,120,120,0.95)':'rgba(160,60,60,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,b2x,by,bw,bh,4); ctx.stroke();
+  txt('В ГЛАВНОЕ МЕНЮ', b2x+bw/2, by+bh/2+1, 13, hv?'#ffd8d8':'#e08e8e', 'center', 'bold');
+  addZone(b2x,by,bw,bh,()=>{
+    Snd.click(); stopAllAudio(); game = null; screen='menu';
+  });
+}
+
+/* ============================================================
+   МАГАЗИН
+   ============================================================ */
+function renderShop(){
+  const G = game;
+  ctx.fillStyle = 'rgba(3,7,12,0.94)';
+  ctx.fillRect(0,0,VW,VH);
+
+  txt('АРСЕНАЛ И МАГАЗИН', 60, 46, 24, '#bdeaff', 'left', 'bold');
+  txt('КРЕДИТЫ: $ ' + Math.floor(G.credits), 60, 78, 15, '#8dffb0', 'left', 'bold');
+  txt('СМЕНА ' + G.clock + '  •  ПРОДОЛЖИТЕЛЬНОСТЬ: ' + formatTime(G.time), 400, 78, 12,
+      'rgba(150,190,215,0.85)');
+
+  // кнопка закрытия
+  const cw = 190, ch = 38, cx = VW-60-cw, cy = 32;
+  const chv = inRect(mouse.x,mouse.y,cx,cy,cw,ch);
+  ctx.fillStyle = chv?'rgba(30,60,85,0.98)':'rgba(14,26,38,0.95)';
+  rr(ctx,cx,cy,cw,ch,4); ctx.fill();
+  ctx.strokeStyle = chv?'rgba(120,225,255,0.95)':'rgba(70,130,170,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,cx,cy,cw,ch,4); ctx.stroke();
+  txt('ЗАКРЫТЬ [ESC]', cx+cw/2, cy+ch/2+1, 12, chv?'#dcf6ff':'#9fd0e8', 'center', 'bold');
+  addZone(cx,cy,cw,ch,()=>{ Snd.click(); screen='game'; });
+
+  // сетка товаров
+  const items = getShopItems();
+  const cols = 4, cardW = 275, cardH = 120, gapX = 20, gapY = 15;
+  const startX = 60, startY = 110;
+
+  for(let i=0;i<items.length;i++){
+    const it = items[i];
+    const col = i % cols, row = Math.floor(i/cols);
+    const x = startX + col*(cardW+gapX);
+    const y = startY + row*(cardH+gapY);
+
+    const canBuy = !it.owned && G.credits >= it.price;
+    const hv = inRect(mouse.x,mouse.y,x,y,cardW,cardH);
+
+    ctx.fillStyle = it.owned ? 'rgba(16,38,28,0.92)'
+                  : (canBuy ? (hv?'rgba(22,52,76,0.96)':'rgba(12,24,36,0.94)')
+                            : 'rgba(14,16,20,0.92)');
+    rr(ctx,x,y,cardW,cardH,5); ctx.fill();
+    ctx.strokeStyle = it.owned ? 'rgba(80,220,140,0.65)'
+                    : (canBuy ? (hv?'rgba(120,225,255,0.95)':'rgba(60,130,175,0.7)')
+                              : 'rgba(60,62,70,0.6)');
+    ctx.lineWidth = hv && canBuy ? 1.8 : 1.2;
+    rr(ctx,x,y,cardW,cardH,5); ctx.stroke();
+
+    // категория
+    txt(it.cat, x+14, y+18, 9, 'rgba(110,170,205,0.8)', 'left', 'bold');
+
+    // название
+    txt(it.name, x+14, y+42, 13, it.owned?'#8dffb0':(canBuy?'#dcf6ff':'#6a7078'), 'left', 'bold');
+    txt(it.sub, x+14, y+62, 10, 'rgba(140,180,205,0.8)');
+
+    // цена / кнопка
+    const bw = cardW-28, bh = 30, bx = x+14, by = y+cardH-42;
+    if(it.owned){
+      ctx.fillStyle = 'rgba(30,70,50,0.9)';
+      rr(ctx,bx,by,bw,bh,4); ctx.fill();
+      ctx.strokeStyle = 'rgba(80,220,140,0.6)';
+      ctx.lineWidth = 1.2; rr(ctx,bx,by,bw,bh,4); ctx.stroke();
+      txt('УСТАНОВЛЕНО', bx+bw/2, by+bh/2+1, 11, '#8dffb0', 'center', 'bold');
+    } else {
+      const affordable = G.credits >= it.price;
+      ctx.fillStyle = affordable ? (hv?'rgba(40,110,70,0.98)':'rgba(20,56,38,0.95)') : 'rgba(26,26,30,0.9)';
+      rr(ctx,bx,by,bw,bh,4); ctx.fill();
+      ctx.strokeStyle = affordable ? (hv?'rgba(110,255,180,0.95)':'rgba(60,160,110,0.7)') : 'rgba(70,70,78,0.6)';
+      ctx.lineWidth = 1.3; rr(ctx,bx,by,bw,bh,4); ctx.stroke();
+      txt('$ ' + it.price, bx+bw/2, by+bh/2+1, 13, affordable?'#8dffb0':'#5a6068', 'center', 'bold');
+      if(affordable){
+        addZone(bx,by,bw,bh,()=>{ it.buy(); });
+      }
+    }
+  }
+
+  if(settings.crt) drawCRTOverlay(0.3);
+}
+
+/* ============================================================
+   ФИНАЛЬНЫЕ ЭКРАНЫ
+   ============================================================ */
+function renderEndScreen(win){
+  const G = game;
+  drawMenuBackground();
+
+  const title = win ? 'СМЕНА ЗАВЕРШЕНА' : 'СИСТЕМА ПАЛА';
+  const col = win ? '#8dffb0' : '#ff5a5a';
+
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  txt(title, VW/2+3, 90, 42, col, 'center', 'bold');
+  ctx.restore();
+  txt(title, VW/2, 88, 42, col, 'center', 'bold');
+
+  const sub = win ? 'Вы дожили до 06:00. Комплекс выстоял.'
+                  : (G.oxygen <= 0 ? 'Кислород исчерпан. Бункер потерян.'
+                     : 'Ядро терминала уничтожено.');
+  txt(sub, VW/2, 130, 13, 'rgba(170,205,228,0.9)', 'center');
+
+  const px = VW/2 - 340, py = 170, pw = 680, ph = 340;
+  drawPanel(px, py, pw, ph, 'СТАТИСТИКА СМЕНЫ');
+
+  const rows = [
+    ['ПРОЖИТО ВРЕМЕНИ', formatTime(G.time)],
+    ['ИГРОВОЕ ВРЕМЯ', G.clock],
+    ['УНИЧТОЖЕНО УГРОЗ', String(G.stats.kills)],
+    ['ПОТРАЧЕНО ЭНЕРГИИ', Math.round(G.stats.energySpent) + ' кВт'],
+    ['КУПЛЕНО УЛУЧШЕНИЙ', String(G.stats.upgradesBought)],
+    ['ОТРЕМОНТИРОВАНО ШЛЮЗОВ', String(G.stats.repairs)],
+    ['ЗАРАБОТАНО КРЕДИТОВ', '$ ' + Math.floor(G.stats.spent + G.credits)],
+    ['ОСТАТОК КРЕДИТОВ', '$ ' + Math.floor(G.credits)]
+  ];
+  let y = py+52;
+  for(const r of rows){
+    txt(r[0], px+40, y, 12, 'rgba(150,190,215,0.9)');
+    txt(r[1], px+pw-40, y, 13, '#bde8ff', 'right', 'bold');
+    y += 34;
+  }
+
+  if(G.mode === 'endless'){
+    txt('ЛУЧШИЙ РЕЗУЛЬТАТ: ' + formatTime(bestRecord()), VW/2, py+ph+26, 13, '#8dffb0', 'center', 'bold');
+  }
+
+  const bw = 230, bh = 46;
+  const b1x = VW/2 - bw - 12, b2x = VW/2 + 12, by = 600;
+
+  let hv = inRect(mouse.x,mouse.y,b1x,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(30,90,60,0.98)':'rgba(14,36,26,0.95)';
+  rr(ctx,b1x,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(110,255,180,0.95)':'rgba(60,160,110,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,b1x,by,bw,bh,4); ctx.stroke();
+  txt('НОВАЯ СМЕНА', b1x+bw/2, by+bh/2+1, 13, hv?'#d8ffe8':'#8ee0b0', 'center', 'bold');
+  addZone(b1x,by,bw,bh,()=>{ Snd.click(); startGame(G.mode); });
+
+  hv = inRect(mouse.x,mouse.y,b2x,by,bw,bh);
+  ctx.fillStyle = hv?'rgba(24,50,70,0.98)':'rgba(10,20,30,0.9)';
+  rr(ctx,b2x,by,bw,bh,4); ctx.fill();
+  ctx.strokeStyle = hv?'rgba(120,225,255,0.9)':'rgba(60,120,160,0.7)';
+  ctx.lineWidth = 1.4; rr(ctx,b2x,by,bw,bh,4); ctx.stroke();
+  txt('В ГЛАВНОЕ МЕНЮ', b2x+bw/2, by+bh/2+1, 13, hv?'#dcf6ff':'#9fcde6', 'center', 'bold');
+  addZone(b2x,by,bw,bh,()=>{ Snd.click(); game = null; screen='menu'; });
+
+  if(settings.crt) drawCRTOverlay(0.45);
+}
+
+/* ============================================================
+   ГЛАВНЫЙ РЕНДЕР
+   ============================================================ */
+function render(){
+  zones.length = 0;
+  ctx.imageSmoothingEnabled = true;
+
+  if(screen === 'game'){
+    renderGame();
+  }
+  else if(screen === 'menu'){ renderMenu(); }
+  else if(screen === 'modes'){ renderModes(); }
+  else if(screen === 'settings'){ renderSettings(); }
+  else if(screen === 'help'){ renderHelp(); }
+  else if(screen === 'pause'){
+    renderGame();
+    renderPauseOverlay();
+  }
+  else if(screen === 'shop'){
+    renderGame();
+    renderShop();
+  }
+  else if(screen === 'over' || screen === 'victory'){
+    renderEndScreen(screen === 'victory');
+  }
+}
+
+/* ============================================================
+   ОБНОВЛЕНИЕ
+   ============================================================ */
+function update(dt){
+  menuT += dt;
+
+  noiseTick++;
+  if(noiseTick % 3 === 0) updateNoise();
+
+  if(screen === 'game'){
+    updateGame(dt);
+    updateEffects(dt);
+  }
+}
+
+/* ============================================================
+   ВВОД
+   ============================================================ */
+let mouseDown = false;
+
+function updateMouse(e){
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (VW / r.width);
+  mouse.y = (e.clientY - r.top) * (VH / r.height);
+}
+
+canvas.addEventListener('mousemove', updateMouse);
+
+canvas.addEventListener('mousedown', function(e){
+  if(e.button !== 0) return;
+  Snd.init();
+  updateMouse(e);
+  mouseDown = true;
+  const z = hitTest(mouse.x, mouse.y);
+  if(z){ z.fn(); return; }
+  if(screen === 'game'){ fireAt(mouse.x, mouse.y); }
+});
+
+window.addEventListener('mouseup', function(){ mouseDown = false; });
+
+canvas.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+
+canvas.addEventListener('touchstart', function(e){
+  e.preventDefault();
+  if(e.touches.length === 0) return;
+  Snd.init();
+  const t = e.touches[0];
+  updateMouse(t);
+  const z = hitTest(mouse.x, mouse.y);
+  if(z){ z.fn(); return; }
+  if(screen === 'game'){ fireAt(mouse.x, mouse.y); }
+}, {passive:false});
+
+canvas.addEventListener('touchmove', function(e){
+  e.preventDefault();
+  if(e.touches.length === 0) return;
+  updateMouse(e.touches[0]);
+}, {passive:false});
+
+window.addEventListener('keydown', function(e){
+  Snd.init();
+
+  if(screen === 'game'){
+    if(e.key >= '1' && e.key <= '6'){
+      game.sector = parseInt(e.key,10) - 1;
+      Snd.click();
+      return;
+    }
+    if(e.code === 'Space'){
+      e.preventDefault();
+      rebootEnergy();
+      return;
+    }
+    if(e.key === 'q' || e.key === 'Q'){ cycleWeapon(-1); return; }
+    if(e.key === 'e' || e.key === 'E'){ cycleWeapon(1); return; }
+    if(e.key === 'r' || e.key === 'R'){ repairGates(); return; }
+    if(e.key === 'f' || e.key === 'F'){ boostOxygen(); return; }
+    if(e.key === 'b' || e.key === 'B'){ screen = 'shop'; Snd.click(); return; }
+    if(e.key === 'Escape'){ screen = 'pause'; Snd.click(); return; }
+  }
+  else if(screen === 'pause' || screen === 'shop'){
+    if(e.key === 'Escape'){ screen = 'game'; Snd.click(); }
+  }
+  else if(screen === 'modes' || screen === 'settings' || screen === 'help'){
+    if(e.key === 'Escape'){ screen = 'menu'; Snd.click(); }
+  }
+});
+
+/* ============================================================
+   МАСШТАБИРОВАНИЕ
+   ============================================================ */
+function resize(){
+  const s = Math.min(window.innerWidth / VW, window.innerHeight / VH);
+  const w = Math.floor(VW * s), h = Math.floor(VH * s);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.style.left = Math.floor((window.innerWidth - w)/2) + 'px';
+  canvas.style.top = Math.floor((window.innerHeight - h)/2) + 'px';
+}
+window.addEventListener('resize', resize);
+
+/* ============================================================
+   ИНИЦИАЛИЗАЦИЯ И ЦИКЛ
+   ============================================================ */
+buildBackground();
+resize();
+updateNoise();
+
+let lastT = performance.now();
+function loop(now){
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if(dt > 0.1) dt = 0.1;
+  if(dt < 0) dt = 0;
+  T += dt;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
